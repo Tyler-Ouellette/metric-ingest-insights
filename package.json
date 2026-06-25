@@ -1,0 +1,32 @@
+{
+  "name": "metric-ingest-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npx dt-app dev",
+    "start": "npx dt-app start",
+    "build": "npx dt-app build",
+    "deploy": "npx dt-app deploy",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dynatrace-sdk/app-environment": "^1.1.4",
+    "@dynatrace-sdk/client-notification-v2": "^2.2.0",
+    "@dynatrace-sdk/client-query": "^1.25.0",
+    "@dynatrace-sdk/navigation": "^2.2.1",
+    "@dynatrace-sdk/units": "^1.5.0",
+    "@dynatrace/strato-components": "^3.7.0",
+    "@dynatrace/strato-components-preview": "^3.4.1",
+    "@dynatrace/strato-design-tokens": "^1.5.0",
+    "@dynatrace/strato-icons": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-intl": "^7.1.14"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "dt-app": "^1.10.2",
+    "typescript": "~5.9.3"
+  }
+}

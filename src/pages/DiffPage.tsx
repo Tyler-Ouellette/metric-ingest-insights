@@ -1,0 +1,222 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Card, Loader, Stat } from "../components/Common";
+import { SortableTable } from "../components/SortableTable";
+import { fetchAllMetricCardinality, MetricKeyRow } from "../lib/queries";
+import { fmtNum } from "../lib/forecast";
+import { costUSD, fmtUSD } from "../lib/cost";
+import { useSettings } from "../state/SettingsContext";
+
+const ASSUMED_DP_PER_SERIES_PER_DAY = 1440;
+
+interface DiffRow {
+  metric_key: string;
+  current: number;
+  previous: number;
+  delta: number;
+  pctChange: number;
+  isNew: boolean;
+  isGone: boolean;
+  costDelta: number;
+}
+
+type Period = "7d" | "14d" | "30d";
+type Filter = "all" | "new" | "gone" | "grew" | "shrank";
+
+export const DiffPage: React.FC = () => {
+  const { rateCentsPerDp } = useSettings();
+  const [period, setPeriod] = useState<Period>("7d");
+  const [loading, setLoading] = useState(true);
+  const [progress, setProgress] = useState("");
+  const [rows, setRows] = useState<DiffRow[]>([]);
+  const [filter, setFilter] = useState<Filter>("new");
+  const [textFilter, setTextFilter] = useState("");
+
+  useEffect(() => {
+    let abort = false;
+    setLoading(true);
+    (async () => {
+      setProgress(`Fetching current cardinality...`);
+      const current = await fetchAllMetricCardinality("now()-2h");
+      if (abort) return;
+
+      setProgress(`Fetching cardinality from ${period} ago...`);
+      // 2-hour window ending at "now() - <period>"
+      const previous = await fetchAllMetricCardinality(
+        `now()-${period}-2h`,
+        `now()-${period}`
+      );
+      if (abort) return;
+
+      const prevMap = new Map<string, number>();
+      for (const m of previous) prevMap.set(m.metric_key, m.series);
+      const curMap = new Map<string, number>();
+      for (const m of current) curMap.set(m.metric_key, m.series);
+
+      const dailyCostPerSeries = costUSD(ASSUMED_DP_PER_SERIES_PER_DAY, rateCentsPerDp);
+
+      const allKeys = new Set<string>([...prevMap.keys(), ...curMap.keys()]);
+      const out: DiffRow[] = [];
+      allKeys.forEach((k) => {
+        const cur = curMap.get(k) ?? 0;
+        const prev = prevMap.get(k) ?? 0;
+        const delta = cur - prev;
+        const pctChange = prev === 0 ? (cur > 0 ? Infinity : 0) : (delta / prev) * 100;
+        out.push({
+          metric_key: k,
+          current: cur,
+          previous: prev,
+          delta,
+          pctChange,
+          isNew: prev === 0 && cur > 0,
+          isGone: prev > 0 && cur === 0,
+          costDelta: dailyCostPerSeries * delta * 365,
+        });
+      });
+      setRows(out);
+      setLoading(false);
+    })();
+    return () => { abort = true; };
+  }, [period, rateCentsPerDp]);
+
+  const filtered = useMemo(() => {
+    let r = rows;
+    if (filter === "new") r = r.filter((x) => x.isNew);
+    else if (filter === "gone") r = r.filter((x) => x.isGone);
+    else if (filter === "grew") r = r.filter((x) => !x.isNew && !x.isGone && x.delta > 0);
+    else if (filter === "shrank") r = r.filter((x) => !x.isNew && !x.isGone && x.delta < 0);
+    if (textFilter) r = r.filter((x) => x.metric_key.toLowerCase().includes(textFilter.toLowerCase()));
+    return r;
+  }, [rows, filter, textFilter]);
+
+  if (loading) return <Loader msg={progress || "Comparing snapshots..."} />;
+
+  const newRows = rows.filter((r) => r.isNew);
+  const goneRows = rows.filter((r) => r.isGone);
+  const grewRows = rows.filter((r) => !r.isNew && !r.isGone && r.delta > 0);
+  const shrankRows = rows.filter((r) => !r.isNew && !r.isGone && r.delta < 0);
+
+  const totalDelta = rows.reduce((a, r) => a + r.delta, 0);
+  const totalCostDelta = rows.reduce((a, r) => a + r.costDelta, 0);
+  const totalNew = newRows.reduce((a, r) => a + r.current, 0);
+  const totalGone = goneRows.reduce((a, r) => a + r.previous, 0);
+  const newAnnual = costUSD(ASSUMED_DP_PER_SERIES_PER_DAY, rateCentsPerDp) * totalNew * 365;
+  const goneAnnual = costUSD(ASSUMED_DP_PER_SERIES_PER_DAY, rateCentsPerDp) * totalGone * 365;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <Card>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, opacity: 0.7 }}>Compare current to:</span>
+          {(["7d", "14d", "30d"] as Period[]).map((p) => (
+            <button
+              key={p}
+              onClick={() => setPeriod(p)}
+              style={{
+                ...btnSec,
+                background: period === p ? "rgba(20,150,255,0.15)" : "transparent",
+                borderColor: period === p ? "#1496ff" : "rgba(128,128,128,0.4)",
+              }}
+            >
+              {p} ago
+            </button>
+          ))}
+        </div>
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+        <Stat label="New metric keys" value={fmtNum(newRows.length)}
+              sub={`${fmtNum(totalNew)} series → ${fmtUSD(newAnnual)}/yr`} />
+        <Stat label="Disappeared metric keys" value={fmtNum(goneRows.length)}
+              sub={`${fmtNum(totalGone)} series → ${fmtUSD(goneAnnual)}/yr removed`} />
+        <Stat label="Grew" value={fmtNum(grewRows.length)} />
+        <Stat label="Shrank" value={fmtNum(shrankRows.length)} />
+        <Stat label="Net series change" value={(totalDelta >= 0 ? "+" : "") + fmtNum(totalDelta)}
+              sub={`${totalCostDelta >= 0 ? "+" : ""}${fmtUSD(totalCostDelta)}/yr`} />
+      </div>
+
+      <Card>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)} style={inputStyle}>
+            <option value="new">🆕 New ({newRows.length})</option>
+            <option value="gone">🗑 Disappeared ({goneRows.length})</option>
+            <option value="grew">📈 Grew ({grewRows.length})</option>
+            <option value="shrank">📉 Shrank ({shrankRows.length})</option>
+            <option value="all">All changed ({rows.length})</option>
+          </select>
+          <input
+            placeholder="Filter metric keys..."
+            value={textFilter}
+            onChange={(e) => setTextFilter(e.target.value)}
+            style={{ ...inputStyle, flex: 1, minWidth: 200 }}
+          />
+          <span style={{ fontSize: 12, opacity: 0.7 }}>{filtered.length} matches</span>
+          <button onClick={() => downloadCsvDiff(filtered)} style={btnSec}>Export CSV</button>
+        </div>
+      </Card>
+
+      <Card>
+        <SortableTable
+          columns={[
+            { key: "metric_key", header: "Metric key", render: (r: DiffRow) => {
+              const tag = r.isNew ? "NEW" : r.isGone ? "GONE" : null;
+              const tagColor = r.isNew ? "#10b981" : r.isGone ? "#6b7280" : "";
+              return <><code>{r.metric_key}</code>{tag && <span style={{ marginLeft: 8, fontSize: 10, padding: "1px 6px", background: tagColor, color: "#fff", borderRadius: 3, fontWeight: 600 }}>{tag}</span>}</>;
+            }, sortValue: (r: DiffRow) => r.metric_key },
+            { key: "previous", header: `Then (${period} ago)`, align: "right", render: (r: DiffRow) => r.previous === 0 ? "\u2014" : fmtNum(r.previous), sortValue: (r: DiffRow) => r.previous },
+            { key: "current", header: "Now", align: "right", render: (r: DiffRow) => r.current === 0 ? "\u2014" : fmtNum(r.current), sortValue: (r: DiffRow) => r.current },
+            { key: "delta", header: "\u0394 series", align: "right", render: (r: DiffRow) => <span style={{ color: r.delta > 0 ? "#ff6b35" : r.delta < 0 ? "#10b981" : undefined, fontWeight: 600 }}>{r.delta >= 0 ? "+" : ""}{fmtNum(r.delta)}</span>, sortValue: (r: DiffRow) => r.delta },
+            { key: "pct", header: "% change", align: "right", render: (r: DiffRow) => !isFinite(r.pctChange) ? "\u221E" : `${r.pctChange >= 0 ? "+" : ""}${r.pctChange.toFixed(1)}%`, sortValue: (r: DiffRow) => isFinite(r.pctChange) ? r.pctChange : 999999 },
+            { key: "cost", header: "\u0394 annual cost", align: "right", render: (r: DiffRow) => <span style={{ color: r.costDelta > 0 ? "#ff6b35" : r.costDelta < 0 ? "#10b981" : undefined, fontWeight: 600 }}>{r.costDelta >= 0 ? "+" : ""}{fmtUSD(r.costDelta)}</span>, sortValue: (r: DiffRow) => Math.abs(r.costDelta) },
+          ]}
+          data={filtered}
+          rowKey={(r) => r.metric_key}
+          maxRows={500}
+          defaultSortKey="cost"
+          defaultSortDir="desc"
+        />
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 11, opacity: 0.65 }}>
+          Compares 2-hour cardinality snapshots from <em>now</em> vs <em>{period} ago</em>. Sorted by absolute Δ annual cost. Values may be approximate when a metric is bursty within the 2h window.
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+function downloadCsvDiff(rows: DiffRow[]) {
+  const statusOf = (r: DiffRow) =>
+    r.isNew ? "new" : r.isGone ? "gone" : r.delta > 0 ? "grew" : r.delta < 0 ? "shrank" : "unchanged";
+  const header = ["metric_key", "status", "then_series", "now_series", "delta_series", "pct_change", "delta_annual_cost_usd"];
+  const lines = [header.join(",")];
+  for (const r of rows) {
+    const pct = !isFinite(r.pctChange) ? "" : r.pctChange.toFixed(2);
+    lines.push([`"${r.metric_key}"`, statusOf(r), r.previous, r.current, r.delta, pct, r.costDelta.toFixed(6)].join(","));
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `metric-diff-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+const inputStyle: React.CSSProperties = {
+  padding: "6px 10px",
+  background: "rgba(128,128,128,0.1)",
+  border: "1px solid rgba(128,128,128,0.3)",
+  borderRadius: 4,
+  color: "inherit",
+  fontSize: 13,
+};
+const btnSec: React.CSSProperties = {
+  padding: "6px 12px",
+  background: "transparent",
+  border: "1px solid rgba(128,128,128,0.4)",
+  borderRadius: 4,
+  color: "inherit",
+  cursor: "pointer",
+  fontSize: 12,
+};
