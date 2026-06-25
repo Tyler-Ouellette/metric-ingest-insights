@@ -3,7 +3,7 @@
   "app": {
     "name": "Metric Ingest Insights",
     "version": "0.0.1",
-    "id": "my.metric.ingest",
+    "id": "my.metric.ingest.insights",
     "description": "Analyze metric ingest volume by metric key, source, and forecast trends.",
     "scopes": [
       { "name": "storage:metrics:read", "comment": "fetch metric.series and timeseries" },
